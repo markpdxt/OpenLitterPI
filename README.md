@@ -1,6 +1,6 @@
 # OpenLitterPI
 
-An open-source, automated cat litterbox powered by Raspberry PI and TensorFlow Lite. Uses computer vision to detect when your cat uses the litterbox, waits an appropriate time after they leave, then automatically cycles a self-cleaning mechanism. Tested with a Litter-Robot 3
+An open-source, automated cat litterbox powered by Raspberry PI and TensorFlow Lite. Uses computer vision to detect when your cat uses the litterbox, waits an appropriate time after they leave, then automatically cycles a self-cleaning mechanism.
 
 ## Features
 
