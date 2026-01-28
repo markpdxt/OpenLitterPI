@@ -1,0 +1,33 @@
+# OpenLitterPI .gitignore
+# ======================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environment
+openlitterpi-env/
+venv/
+.venv/
+ENV/
+
+# Runtime generated files
+photos/
+*.log
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Sensitive files (if any)
+*.env
+.env.local

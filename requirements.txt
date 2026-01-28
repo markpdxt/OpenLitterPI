@@ -1,0 +1,10 @@
+# OpenLitterPI Dependencies
+# =========================
+# Install with: pip install -r requirements.txt
+
+tflite-runtime
+tflite-support
+opencv-python
+numpy
+adafruit-circuitpython-motorkit
+adafruit-blinka
