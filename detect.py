@@ -150,7 +150,12 @@ def run(model: str, camera_id: int, width: int, height: int, num_threads: int,
         print('-----------------')
 
         if status != Status.IDLE and since_detected > reset_threshold:
-            reset()
+            # Reset state (was calling broken reset() function)
+            status = Status.IDLE
+            elapsed_time = 0
+            occupied_frames = 0
+            timestamp_last_detected = 2556057600  # 2050
+            print("State reset to IDLE")
 
         # Calculate the FPS
         if counter % fps_avg_frame_count == 0:
@@ -169,19 +174,26 @@ def run(model: str, camera_id: int, width: int, height: int, num_threads: int,
         text_location = (left_margin, row_size * 2)
         if elapsed_time > 0:
             cv2.putText(image, text, text_location, cv2.FONT_HERSHEY_PLAIN, font_size, text_color, font_thickness)
-        
+
         # Show the FPS
         text = 'FPS: {:.1f}'.format(fps)
         text_location = (left_margin, row_size * 3)
         cv2.putText(image, text, text_location, cv2.FONT_HERSHEY_PLAIN, font_size, text_color, font_thickness)
 
+        # Stop the program if the ESC key is pressed.
+        # if cv2.waitKey(1) == 27:
+        #    break
+
+        # if display:
+        #    cv2.imshow('object_detector', image)
+
     cap.release()
-    cv2.destroyAllWindows()
+    # cv2.destroyAllWindows()
 
 def reset():
     status = Status.IDLE
-    elapsed_time = occupied_frames = 0
-    timestamp_last_detected = 2556057600 # 2050
+    # elapsed_time = occupied_frames = 0
+    # timestamp_last_detected = 2556057600 # 2050
     # utils.send_message(status.name, image)
 
 def main():
@@ -218,11 +230,11 @@ def main():
       action='store_true',
       required=False,
       default=False)
-  parser.add_argument(    
-      '--display', 
-      help='View video on local device', 
+  parser.add_argument(
+      '--display',
+      help='View video on local device',
       required=False,
-      default=False)       
+      default=False)
   args = parser.parse_args()
 
   run(args.model, int(args.cameraId), args.frameWidth, args.frameHeight,
