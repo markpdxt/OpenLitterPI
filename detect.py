@@ -175,13 +175,6 @@ def run(model: str, camera_id: int, width: int, height: int, num_threads: int,
         text_location = (left_margin, row_size * 3)
         cv2.putText(image, text, text_location, cv2.FONT_HERSHEY_PLAIN, font_size, text_color, font_thickness)
 
-        # Stop the program if the ESC key is pressed.
-        if cv2.waitKey(1) == 27:
-            break
-
-        if display:
-            cv2.imshow('object_detector', image)
-
     cap.release()
     cv2.destroyAllWindows()
 
