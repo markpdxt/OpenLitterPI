@@ -19,33 +19,25 @@ import cv2
 import time
 import argparse
 import numpy as np
-from enum import Enum
 from tflite_support.task import core
 from tflite_support.task import vision
 from tflite_support.task import processor
-from datetime import datetime, timedelta
 import utils
+from state_machine import LitterBoxStateMachine
 
-class Status(Enum):
-    IDLE = 0
-    DETECTED = 1
-    USING = 2
-    WAITING = 3
-    CYCLING = 4
-    COMPLETE = 5
+TARGET_LABELS = {'cat', 'teddy bear'}
+
 
 def run(model: str, camera_id: int, width: int, height: int, num_threads: int,
         enable_edgetpu: bool, display: bool) -> None:
 
-    # Litterbox
-    occupied_frames_threshold = 15
-    use_threshold = 45   # seconds
-    wait_threshold = 60*7
-    reset_threshold = 60*8
-    status = Status.IDLE
-    timestamp_last_detected = 2556057600 # 2050
-    elapsed_time = 0
-    occupied_frames = 0
+    sm = LitterBoxStateMachine(
+        occupied_frames_threshold=15,
+        use_threshold=45,
+        wait_threshold=60 * 7,
+        reset_threshold=60 * 8,
+    )
+
     isStartup = True
 
     # Calculate FPS
@@ -96,66 +88,25 @@ def run(model: str, camera_id: int, width: int, height: int, num_threads: int,
         # Draw keypoints and edges on input image
         image = utils.visualize(image, detection_result)
 
-        if isStartup == True:
+        if isStartup:
             utils.send_message("Startup", image)
             isStartup = False
 
-        for detection in detection_result.detections:
-            category = detection.categories[0]
-            category_name = category.category_name
-            probability = round(category.score, 2)
-            result_text = category_name + ' (' + str(probability) + ')'
+        # Collapse multiple detections into a single boolean per frame
+        cat_detected = any(
+            d.categories[0].category_name in TARGET_LABELS
+            for d in detection_result.detections
+        )
 
-            if (category_name == 'cat' or category_name == 'teddy bear'):
-                occupied_frames = occupied_frames + 1
-                elapsed_time = occupied_frames
-                timestamp_last_detected = int(round(datetime.now().timestamp()))
+        # Run the state machine
+        actions = sm.process_frame(cat_detected)
 
-                if occupied_frames <= occupied_frames_threshold:
-                    if status != Status.DETECTED:
-                        status = Status.DETECTED
-                        utils.send_message(status.name, image)
-                    elapsed_time = occupied_frames
-                elif occupied_frames > occupied_frames_threshold:
-                    if status != Status.USING:
-                        status = Status.USING
-                        utils.send_message(status.name, image)
-                    elapsed_time = occupied_frames
-
-        object_departed = int(round(datetime.now().timestamp())) - timestamp_last_detected
-
-        if status.value > 1: # USING or above
-            if object_departed > use_threshold and object_departed <= wait_threshold:
-                if status != Status.WAITING:
-                    status = Status.WAITING
-                    utils.send_message(status.name, image)
-                elapsed_time = object_departed
-            elif object_departed > wait_threshold:
-                if status != Status.CYCLING and status != Status.COMPLETE:
-                    status = Status.CYCLING
-                    utils.send_message(status.name, image)
-                    elapsed_time = object_departed
-                    utils.cycle()
-                    status = Status.COMPLETE
-                    utils.send_message(status.name, image)
-                    elapsed_time = occupied_frames = 0
-
-        # if status == Status.DETECTED and int(round(datetime.now().timestamp())) - timestamp_last_detected > wait_threshold:
-        #     reset()
-
-        since_detected = int(round(datetime.now().timestamp())) - timestamp_last_detected
-        print(f'time since detected: {since_detected}')
-        print(f'timestamp_last_detected: {timestamp_last_detected}')
-        print(f'reset_threshold: {reset_threshold}')
-        print('-----------------')
-
-        if status != Status.IDLE and since_detected > reset_threshold:
-            # Reset state (was calling broken reset() function)
-            status = Status.IDLE
-            elapsed_time = 0
-            occupied_frames = 0
-            timestamp_last_detected = 2556057600  # 2050
-            print("State reset to IDLE")
+        # Execute actions returned by the state machine
+        for action, status_name in actions:
+            if action == "message":
+                utils.send_message(status_name, image)
+            elif action == "cycle":
+                utils.cycle()
 
         # Calculate the FPS
         if counter % fps_avg_frame_count == 0:
@@ -164,37 +115,26 @@ def run(model: str, camera_id: int, width: int, height: int, num_threads: int,
             start_time = time.time()
 
         # Show the Status
-        text = '{}'.format(status)
+        text = '{}'.format(sm.status)
         text_location = (left_margin, row_size)
         cv2.putText(image, text, text_location, cv2.FONT_HERSHEY_PLAIN,
                     font_size, text_color, font_thickness)
 
         # Show the elapsed time
-        text = '{} sec'.format(elapsed_time)
+        text = '{} sec'.format(sm.elapsed_time)
         text_location = (left_margin, row_size * 2)
-        if elapsed_time > 0:
-            cv2.putText(image, text, text_location, cv2.FONT_HERSHEY_PLAIN, font_size, text_color, font_thickness)
+        if sm.elapsed_time > 0:
+            cv2.putText(image, text, text_location, cv2.FONT_HERSHEY_PLAIN,
+                        font_size, text_color, font_thickness)
 
         # Show the FPS
         text = 'FPS: {:.1f}'.format(fps)
         text_location = (left_margin, row_size * 3)
-        cv2.putText(image, text, text_location, cv2.FONT_HERSHEY_PLAIN, font_size, text_color, font_thickness)
-
-        # Stop the program if the ESC key is pressed.
-        # if cv2.waitKey(1) == 27:
-        #    break
-
-        # if display:
-        #    cv2.imshow('object_detector', image)
+        cv2.putText(image, text, text_location, cv2.FONT_HERSHEY_PLAIN,
+                    font_size, text_color, font_thickness)
 
     cap.release()
-    # cv2.destroyAllWindows()
 
-def reset():
-    status = Status.IDLE
-    # elapsed_time = occupied_frames = 0
-    # timestamp_last_detected = 2556057600 # 2050
-    # utils.send_message(status.name, image)
 
 def main():
   parser = argparse.ArgumentParser(
