@@ -80,35 +80,49 @@ class TestDetectedToUsing:
         assert sm.elapsed_time == 10
 
 
-# --- Frame counter decrement fix ---
+# --- Frame counter behavior ---
 
 class TestOccupiedFramesDecrement:
-    def test_frames_decrement_when_no_cat(self, sm, clock):
+    def test_frames_hold_in_detected_state(self, sm, clock):
+        """Once DETECTED, occupied_frames should NOT decrement so
+        intermittent camera detections can accumulate toward USING."""
         for _ in range(10):
             sm.process_frame(cat_detected=True)
         assert sm.occupied_frames == 10
+        assert sm.status == Status.DETECTED
 
         for _ in range(5):
             sm.process_frame(cat_detected=False)
+        # Frames hold steady — no decrement in DETECTED state
+        assert sm.occupied_frames == 10
+
+    def test_intermittent_detection_accumulates_in_detected(self, sm, clock):
+        """Cat seen for 5 frames, gone for 10, seen for 5 more.
+        Frames should accumulate since we're in DETECTED state."""
+        for _ in range(5):
+            sm.process_frame(cat_detected=True)
+        assert sm.status == Status.DETECTED
         assert sm.occupied_frames == 5
 
-    def test_frames_dont_go_below_zero(self, sm, clock):
-        sm.process_frame(cat_detected=True)
-        for _ in range(20):
-            sm.process_frame(cat_detected=False)
-        assert sm.occupied_frames == 0
-
-    def test_intermittent_detection_doesnt_accumulate(self, sm, clock):
-        """Cat seen for 5 frames, gone for 10, seen for 5 more.
-        Should NOT reach the 15-frame threshold."""
-        for _ in range(5):
-            sm.process_frame(cat_detected=True)
         for _ in range(10):
             sm.process_frame(cat_detected=False)
+        assert sm.occupied_frames == 5  # held, not decremented
+
         for _ in range(5):
             sm.process_frame(cat_detected=True)
-        assert sm.occupied_frames < 15
-        assert sm.status != Status.USING
+        assert sm.occupied_frames == 10
+
+    def test_intermittent_detection_reaches_using(self, sm, clock):
+        """Simulates a real camera: cat present but detected ~60% of frames.
+        Should still reach USING state."""
+        import random
+        random.seed(42)
+        for _ in range(50):
+            detected = random.random() < 0.6
+            sm.process_frame(cat_detected=detected)
+        # With 60% detection over 50 frames, ~30 detections should
+        # easily pass the 15-frame threshold
+        assert sm.status == Status.USING
 
 
 # --- Multi-detect per frame ---

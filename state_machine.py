@@ -102,9 +102,12 @@ class LitterBoxStateMachine:
                     actions.append(("message", self.status.name))
                 self.elapsed_time = self.occupied_frames
         else:
-            # Decrement occupied_frames toward zero when no detection
-            # so brief/intermittent detections don't accumulate
-            if self.occupied_frames > 0:
+            # Only decrement in IDLE to filter out false positives before
+            # a real detection is confirmed. Once DETECTED or higher, stop
+            # decrementing so intermittent camera detections can accumulate
+            # toward the USING threshold. Time-based transitions handle the
+            # "cat left" case (45s timeout resets DETECTED → IDLE).
+            if self.occupied_frames > 0 and self.status == Status.IDLE:
                 self.occupied_frames -= 1
 
         # Time-based transitions (only when actively tracking)
