@@ -35,8 +35,9 @@ def sm(clock):
     return LitterBoxStateMachine(
         occupied_frames_threshold=15,
         use_threshold=45.0,
-        wait_threshold=420.0,   # 7 min
-        reset_threshold=480.0,  # 8 min
+        wait_threshold=420.0,    # 7 min
+        reset_threshold=480.0,   # 8 min
+        detected_timeout=300.0,  # 5 min
         time_fn=clock,
     )
 
@@ -173,28 +174,51 @@ class TestFullCycle:
         assert sm.status == Status.IDLE
 
 
-# --- DETECTED state stall fix ---
+# --- DETECTED timeout and promotion ---
 
-class TestDetectedStallFix:
-    def test_detected_resets_after_use_threshold(self, sm, clock):
-        """If cat is detected briefly but never reaches USING,
-        it should not stay stuck in DETECTED forever."""
+class TestDetectedTimeout:
+    def test_detected_stays_during_use_threshold(self, sm, clock):
+        """DETECTED should NOT reset after use_threshold (45s) anymore.
+        It waits for detected_timeout (300s) to allow cats time in the box."""
         for _ in range(5):
             sm.process_frame(cat_detected=True)
         assert sm.status == Status.DETECTED
 
-        # Cat leaves, advance past use_threshold
+        # Advance past use_threshold but before detected_timeout
         clock.advance(50)
         sm.process_frame(cat_detected=False)
-        assert sm.status == Status.IDLE
+        assert sm.status == Status.DETECTED  # still DETECTED, not IDLE
 
-    def test_detected_does_not_trigger_cycle(self, sm, clock):
-        """Brief detection should never trigger a motor cycle."""
+    def test_detected_promotes_to_waiting_after_timeout(self, sm, clock):
+        """After detected_timeout (300s), DETECTED promotes to WAITING
+        since the cat likely used the box but was only briefly visible."""
         for _ in range(5):
             sm.process_frame(cat_detected=True)
-        clock.advance(500)
+        assert sm.status == Status.DETECTED
+
+        # Advance past detected_timeout
+        clock.advance(305)
         actions = sm.process_frame(cat_detected=False)
-        assert ("cycle", None) not in actions
+        assert sm.status == Status.WAITING
+        assert ("message", "WAITING") in actions
+
+    def test_detected_promotion_leads_to_cycling(self, sm, clock):
+        """After DETECTED promotes to WAITING, system should eventually
+        reach CYCLING when wait_threshold is exceeded."""
+        for _ in range(5):
+            sm.process_frame(cat_detected=True)
+        assert sm.status == Status.DETECTED
+
+        # Advance past wait_threshold (420s from last detection)
+        clock.advance(425)
+        actions = sm.process_frame(cat_detected=False)
+        # First frame promotes DETECTED → WAITING
+        assert sm.status == Status.WAITING
+
+        # Next frame: now in WAITING, since_detected > wait_threshold → CYCLING
+        actions = sm.process_frame(cat_detected=False)
+        assert sm.status == Status.COMPLETE
+        assert ("cycle", None) in actions
 
 
 # --- Global reset ---
@@ -248,3 +272,92 @@ class TestHappyPath:
         clock.advance(500)
         sm.process_frame(cat_detected=False)
         assert sm.status == Status.IDLE
+
+
+# --- Double detection on cat exit ---
+
+class TestDoubleDetection:
+    def test_cat_exit_no_second_detected_notification(self, sm, clock):
+        """Cat enters (DETECTED), goes inside box (invisible for 60s),
+        then exits (visible again). Should NOT trigger a second DETECTED."""
+        # Cat enters — first detection
+        actions = sm.process_frame(cat_detected=True)
+        assert sm.status == Status.DETECTED
+        assert ("message", "DETECTED") in actions
+
+        # Cat inside box, invisible for 60s
+        clock.advance(60)
+        sm.process_frame(cat_detected=False)
+        # Should still be DETECTED (detected_timeout is 300s)
+        assert sm.status == Status.DETECTED
+
+        # Cat exits — visible again
+        actions = sm.process_frame(cat_detected=True)
+        # Should NOT get a second DETECTED message
+        assert ("message", "DETECTED") not in actions
+        assert sm.status == Status.DETECTED
+
+    def test_cat_exit_after_long_stay_no_second_detected(self, sm, clock):
+        """Cat enters, stays 4 minutes (invisible), exits. Still one DETECTED."""
+        actions = sm.process_frame(cat_detected=True)
+        assert ("message", "DETECTED") in actions
+
+        # Cat inside box for 4 minutes
+        clock.advance(240)
+        sm.process_frame(cat_detected=False)
+        assert sm.status == Status.DETECTED
+
+        # Cat exits — visible again
+        actions = sm.process_frame(cat_detected=True)
+        assert ("message", "DETECTED") not in actions
+
+
+class TestFullCycleEntryOnlyVisibility:
+    def test_entry_detection_silence_exit_leads_to_cycle(self, sm, clock):
+        """Simulate real scenario: cat seen on entry, invisible inside box,
+        seen on exit, then system waits and cycles."""
+        # Cat enters — brief detection (3 frames)
+        sm.process_frame(cat_detected=True)
+        sm.process_frame(cat_detected=True)
+        sm.process_frame(cat_detected=True)
+        assert sm.status == Status.DETECTED
+
+        # Cat inside box — invisible for 3 minutes
+        clock.advance(180)
+        sm.process_frame(cat_detected=False)
+        assert sm.status == Status.DETECTED
+
+        # Cat exits — brief detection (2 frames)
+        sm.process_frame(cat_detected=True)
+        sm.process_frame(cat_detected=True)
+        assert sm.status == Status.DETECTED
+
+        # Cat gone — wait for detected_timeout (300s from last detection)
+        clock.advance(305)
+        actions = sm.process_frame(cat_detected=False)
+        assert sm.status == Status.WAITING
+        assert ("message", "WAITING") in actions
+
+        # Wait for wait_threshold (420s from last detection)
+        clock.advance(120)  # total 425s from last detection
+        actions = sm.process_frame(cat_detected=False)
+        assert sm.status == Status.COMPLETE
+        assert ("cycle", None) in actions
+
+    def test_single_frame_entry_still_cycles(self, sm, clock):
+        """Even a single detection frame should eventually lead to a cycle
+        if no further activity is detected."""
+        actions = sm.process_frame(cat_detected=True)
+        assert sm.status == Status.DETECTED
+        assert ("message", "DETECTED") in actions
+
+        # No more detections — wait for detected_timeout
+        clock.advance(305)
+        actions = sm.process_frame(cat_detected=False)
+        assert sm.status == Status.WAITING
+
+        # Wait for wait_threshold
+        clock.advance(120)
+        actions = sm.process_frame(cat_detected=False)
+        assert sm.status == Status.COMPLETE
+        assert ("cycle", None) in actions

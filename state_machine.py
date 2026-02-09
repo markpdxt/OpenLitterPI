@@ -50,12 +50,14 @@ class LitterBoxStateMachine:
         use_threshold: float = 45.0,
         wait_threshold: float = 60.0 * 7,
         reset_threshold: float = 60.0 * 8,
+        detected_timeout: float = 60.0 * 5,
         time_fn=None,
     ):
         self.occupied_frames_threshold = occupied_frames_threshold
         self.use_threshold = use_threshold
         self.wait_threshold = wait_threshold
         self.reset_threshold = reset_threshold
+        self.detected_timeout = detected_timeout
         self._time_fn = time_fn or time.time
 
         self.status = Status.IDLE
@@ -128,10 +130,14 @@ class LitterBoxStateMachine:
                     actions.append(("message", self.status.name))
                     self.elapsed_time = 0
                     self.occupied_frames = 0
-        elif self.status == Status.DETECTED and since_detected > self.use_threshold:
+        elif self.status == Status.DETECTED and since_detected > self.detected_timeout:
             # Cat was detected but never sustained long enough for USING.
-            # Reset back to IDLE instead of getting stuck in DETECTED.
-            self._reset()
+            # Promote to WAITING — the cat likely used the box but was only
+            # visible to the camera briefly (entry/exit). The 7-minute wait
+            # before CYCLING provides safety margin against false positives.
+            self.status = Status.WAITING
+            actions.append(("message", self.status.name))
+            self.elapsed_time = int(since_detected)
 
         # Global timeout reset
         if self.status != Status.IDLE and since_detected > self.reset_threshold:
