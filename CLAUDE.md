@@ -53,12 +53,10 @@ ssh -p 52222 pi@192.168.5.13 "cd ~/openlitterpi && python3 -m pytest test_state_
 ### State Machine (core logic)
 
 ```
-IDLE → DETECTED → USING → WAITING → CYCLING → COMPLETE → IDLE
-                     ↓        ↑
-                     └────────┘  (detected_timeout: cat only visible on entry/exit)
+IDLE → DETECTED → USING → WAITING → CYCLING → COMPLETE
 ```
 
-`state_machine.py` contains `LitterBoxStateMachine` - the pure-logic state machine extracted for testability. It has no hardware dependencies. Feed it `process_frame(cat_detected: bool)` each frame and it returns actions: `("message", status_name)` or `("cycle", None)`.
+`state_machine.py` contains `LitterBoxStateMachine` - the pure-logic state machine extracted for testability. It has no hardware dependencies. Feed it `process_frame(cat_detected: bool)` each frame and it returns actions: `("message", status_name)` or `("cycle", None)`. After COMPLETE, status persists until a new cat detection restarts the cycle at DETECTED.
 
 ### Data Flow
 
@@ -73,8 +71,8 @@ USB Camera → detect.py (main loop) → TFLite model → cat_detected boolean
 ### Key Design Decisions
 
 - **State machine is decoupled from hardware** - `state_machine.py` accepts an injectable `time_fn` for deterministic testing with `FakeClock`
-- **Frame counting only decrements in IDLE state** - once DETECTED, the counter holds steady so intermittent camera detections accumulate toward the threshold (15 frames)
-- **DETECTED promotes to WAITING after timeout** - cats are often only visible on entry/exit. The 5-minute `detected_timeout` keeps the system in DETECTED while the cat is inside the box (invisible to camera), then promotes to WAITING instead of resetting to IDLE. This prevents duplicate notifications and ensures the motor eventually cycles.
+- **Frame counting never decrements** - once a detection increments `occupied_frames`, it holds steady so intermittent camera detections accumulate toward the threshold (15 frames), matching original behavior
+- **DETECTED promotes to USING after timeout** - if the cat is detected but then becomes invisible (entered the box), after `detected_timeout` (45s) the system promotes to USING and resets the timer so use_threshold starts fresh
 - **Detection is boolean per frame** - multiple detections in a single frame are collapsed to a single `True` in `detect.py` before reaching the state machine
 - **Motor on M3 port** - three-phase cycle: forward 54s (sift), reverse 62s (dump), forward 7.28s (home)
 
@@ -84,7 +82,7 @@ USB Camera → detect.py (main loop) → TFLite model → cat_detected boolean
 |-----------|-------|---------|
 | `occupied_frames_threshold` | 15 | Frames to confirm cat presence (DETECTED → USING) |
 | `use_threshold` | 45s | No-detection time after USING before WAITING |
-| `detected_timeout` | 300s (5 min) | No-detection time after DETECTED before WAITING |
+| `detected_timeout` | 45s | No-detection time in DETECTED before promoting to USING |
 | `wait_threshold` | 420s (7 min) | No-detection time before CYCLING |
 | `reset_threshold` | 480s (8 min) | Global safety timeout back to IDLE |
 

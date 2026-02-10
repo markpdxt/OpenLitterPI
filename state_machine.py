@@ -17,7 +17,7 @@
 """
 State machine for the OpenLitterPI detection system.
 
-Manages the lifecycle: IDLE -> DETECTED -> USING -> WAITING -> CYCLING -> COMPLETE -> IDLE
+Manages the lifecycle: IDLE -> DETECTED -> USING -> WAITING -> CYCLING -> COMPLETE
 
 Extracted from detect.py so it can be tested without camera/motor hardware.
 """
@@ -50,7 +50,7 @@ class LitterBoxStateMachine:
         use_threshold: float = 45.0,
         wait_threshold: float = 60.0 * 7,
         reset_threshold: float = 60.0 * 8,
-        detected_timeout: float = 60.0 * 5,
+        detected_timeout: float = 45.0,
         time_fn=None,
     ):
         self.occupied_frames_threshold = occupied_frames_threshold
@@ -94,7 +94,9 @@ class LitterBoxStateMachine:
             self._timestamp_last_detected = self._now()
 
             if self.occupied_frames <= self.occupied_frames_threshold:
-                if self.status != Status.DETECTED:
+                # Only transition to DETECTED from IDLE or COMPLETE.
+                # Don't regress from USING+ (e.g., after timeout promotion).
+                if self.status in (Status.IDLE, Status.COMPLETE):
                     self.status = Status.DETECTED
                     actions.append(("message", self.status.name))
                 self.elapsed_time = self.occupied_frames
@@ -103,17 +105,19 @@ class LitterBoxStateMachine:
                     self.status = Status.USING
                     actions.append(("message", self.status.name))
                 self.elapsed_time = self.occupied_frames
-        else:
-            # Only decrement in IDLE to filter out false positives before
-            # a real detection is confirmed. Once DETECTED or higher, stop
-            # decrementing so intermittent camera detections can accumulate
-            # toward the USING threshold. Time-based transitions handle the
-            # "cat left" case (45s timeout resets DETECTED → IDLE).
-            if self.occupied_frames > 0 and self.status == Status.IDLE:
-                self.occupied_frames -= 1
 
         # Time-based transitions (only when actively tracking)
         since_detected = self._seconds_since_detected()
+
+        # DETECTED → USING promotion: cat was detected but became invisible
+        # (likely entered the box). Promote to USING and reset the timer so
+        # the use_threshold countdown starts fresh from this point.
+        if self.status == Status.DETECTED and since_detected > self.detected_timeout:
+            self.status = Status.USING
+            self._timestamp_last_detected = self._now()
+            actions.append(("message", self.status.name))
+            self.elapsed_time = self.occupied_frames
+            since_detected = self._seconds_since_detected()
 
         if self.status.value >= Status.USING.value:
             if since_detected > self.use_threshold and since_detected <= self.wait_threshold:
@@ -130,16 +134,9 @@ class LitterBoxStateMachine:
                     actions.append(("message", self.status.name))
                     self.elapsed_time = 0
                     self.occupied_frames = 0
-        elif self.status == Status.DETECTED and since_detected > self.detected_timeout:
-            # Cat was detected but never sustained long enough for USING.
-            # Promote to WAITING — the cat likely used the box but was only
-            # visible to the camera briefly (entry/exit). The 7-minute wait
-            # before CYCLING provides safety margin against false positives.
-            self.status = Status.WAITING
-            actions.append(("message", self.status.name))
-            self.elapsed_time = int(since_detected)
 
-        # Global timeout reset
+        # Global safety reset: if no detection for reset_threshold,
+        # reset to IDLE to prevent being stuck in any state forever.
         if self.status != Status.IDLE and since_detected > self.reset_threshold:
             self._reset()
 

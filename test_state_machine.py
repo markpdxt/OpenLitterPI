@@ -36,8 +36,8 @@ def sm(clock):
         occupied_frames_threshold=15,
         use_threshold=45.0,
         wait_threshold=420.0,    # 7 min
-        reset_threshold=480.0,   # 8 min
-        detected_timeout=300.0,  # 5 min
+        reset_threshold=480.0,   # 8 min global safety reset
+        detected_timeout=45.0,   # 45s DETECTED → USING promotion
         time_fn=clock,
     )
 
@@ -83,9 +83,9 @@ class TestDetectedToUsing:
 
 # --- Frame counter behavior ---
 
-class TestOccupiedFramesDecrement:
+class TestOccupiedFramesAccumulation:
     def test_frames_hold_in_detected_state(self, sm, clock):
-        """Once DETECTED, occupied_frames should NOT decrement so
+        """Once DETECTED, occupied_frames should hold steady so
         intermittent camera detections can accumulate toward USING."""
         for _ in range(10):
             sm.process_frame(cat_detected=True)
@@ -163,84 +163,29 @@ class TestFullCycle:
         assert sm.occupied_frames == 0
         assert sm.elapsed_time == 0
 
-    def test_complete_resets_to_idle_after_timeout(self, sm, clock):
+    def test_complete_resets_to_idle_after_reset_threshold(self, sm, clock):
+        """After COMPLETE, global reset returns to IDLE."""
         self._reach_using(sm, clock)
         clock.advance(425)
         sm.process_frame(cat_detected=False)
         assert sm.status == Status.COMPLETE
 
-        clock.advance(500)  # past reset_threshold (480s)
+        clock.advance(500)  # past reset_threshold (480s from last detection)
         sm.process_frame(cat_detected=False)
         assert sm.status == Status.IDLE
 
-
-# --- DETECTED timeout and promotion ---
-
-class TestDetectedTimeout:
-    def test_detected_stays_during_use_threshold(self, sm, clock):
-        """DETECTED should NOT reset after use_threshold (45s) anymore.
-        It waits for detected_timeout (300s) to allow cats time in the box."""
-        for _ in range(5):
-            sm.process_frame(cat_detected=True)
-        assert sm.status == Status.DETECTED
-
-        # Advance past use_threshold but before detected_timeout
-        clock.advance(50)
-        sm.process_frame(cat_detected=False)
-        assert sm.status == Status.DETECTED  # still DETECTED, not IDLE
-
-    def test_detected_promotes_to_waiting_after_timeout(self, sm, clock):
-        """After detected_timeout (300s), DETECTED promotes to WAITING
-        since the cat likely used the box but was only briefly visible."""
-        for _ in range(5):
-            sm.process_frame(cat_detected=True)
-        assert sm.status == Status.DETECTED
-
-        # Advance past detected_timeout
-        clock.advance(305)
-        actions = sm.process_frame(cat_detected=False)
-        assert sm.status == Status.WAITING
-        assert ("message", "WAITING") in actions
-
-    def test_detected_promotion_leads_to_cycling(self, sm, clock):
-        """After DETECTED promotes to WAITING, system should eventually
-        reach CYCLING when wait_threshold is exceeded."""
-        for _ in range(5):
-            sm.process_frame(cat_detected=True)
-        assert sm.status == Status.DETECTED
-
-        # Advance past wait_threshold (420s from last detection)
+    def test_new_detection_after_complete_goes_to_detected(self, sm, clock):
+        """A new cat after COMPLETE should start fresh at DETECTED."""
+        self._reach_using(sm, clock)
         clock.advance(425)
-        actions = sm.process_frame(cat_detected=False)
-        # First frame promotes DETECTED → WAITING
-        assert sm.status == Status.WAITING
-
-        # Next frame: now in WAITING, since_detected > wait_threshold → CYCLING
-        actions = sm.process_frame(cat_detected=False)
-        assert sm.status == Status.COMPLETE
-        assert ("cycle", None) in actions
-
-
-# --- Global reset ---
-
-class TestGlobalReset:
-    def test_any_state_resets_after_reset_threshold(self, sm, clock):
-        for _ in range(16):
-            sm.process_frame(cat_detected=True)
-        assert sm.status == Status.USING
-
-        clock.advance(500)  # past reset_threshold
         sm.process_frame(cat_detected=False)
-        assert sm.status == Status.IDLE
+        assert sm.status == Status.COMPLETE
         assert sm.occupied_frames == 0
-        assert sm.elapsed_time == 0
 
-    def test_idle_does_not_reset(self, sm, clock):
-        """IDLE state should not trigger reset logic."""
-        clock.advance(1000)
-        actions = sm.process_frame(cat_detected=False)
-        assert sm.status == Status.IDLE
-        assert actions == []
+        actions = sm.process_frame(cat_detected=True)
+        assert sm.status == Status.DETECTED
+        assert sm.occupied_frames == 1
+        assert ("message", "DETECTED") in actions
 
 
 # --- Happy path end-to-end ---
@@ -268,27 +213,100 @@ class TestHappyPath:
         assert sm.status == Status.COMPLETE
         assert ("cycle", None) in actions
 
-        # 8+ minutes pass -> back to IDLE
+        # 8+ minutes pass -> global reset back to IDLE
         clock.advance(500)
         sm.process_frame(cat_detected=False)
         assert sm.status == Status.IDLE
 
 
-# --- Double detection on cat exit ---
+# --- Global safety reset ---
+
+class TestGlobalReset:
+    def test_any_state_resets_after_reset_threshold(self, sm, clock):
+        """Any non-IDLE state resets to IDLE after reset_threshold."""
+        for _ in range(16):
+            sm.process_frame(cat_detected=True)
+        assert sm.status == Status.USING
+
+        clock.advance(500)  # past reset_threshold (480s)
+        sm.process_frame(cat_detected=False)
+        assert sm.status == Status.IDLE
+        assert sm.occupied_frames == 0
+        assert sm.elapsed_time == 0
+
+    def test_idle_does_not_reset(self, sm, clock):
+        """IDLE state should not trigger reset logic."""
+        clock.advance(1000)
+        actions = sm.process_frame(cat_detected=False)
+        assert sm.status == Status.IDLE
+        assert actions == []
+
+
+# --- DETECTED → USING timeout promotion ---
+
+class TestDetectedToUsingTimeout:
+    def test_detected_stays_before_timeout(self, sm, clock):
+        """DETECTED should persist before detected_timeout expires."""
+        sm.process_frame(cat_detected=True)
+        assert sm.status == Status.DETECTED
+
+        clock.advance(30)  # less than 45s timeout
+        sm.process_frame(cat_detected=False)
+        assert sm.status == Status.DETECTED
+
+    def test_detected_promotes_to_using_after_timeout(self, sm, clock):
+        """After detected_timeout (45s), DETECTED promotes to USING.
+        Cat entered the box and became invisible to the camera."""
+        sm.process_frame(cat_detected=True)
+        assert sm.status == Status.DETECTED
+
+        clock.advance(50)  # past 45s timeout
+        actions = sm.process_frame(cat_detected=False)
+        assert sm.status == Status.USING
+        assert ("message", "USING") in actions
+
+    def test_promotion_resets_timer(self, sm, clock):
+        """After promotion, the use_threshold timer starts fresh.
+        System should NOT immediately cascade to WAITING."""
+        sm.process_frame(cat_detected=True)
+        clock.advance(50)  # promote to USING
+        sm.process_frame(cat_detected=False)
+        assert sm.status == Status.USING
+
+        # 30s later — within use_threshold, should stay USING
+        clock.advance(30)
+        sm.process_frame(cat_detected=False)
+        assert sm.status == Status.USING
+
+    def test_promotion_eventually_cycles(self, sm, clock):
+        """Full flow: DETECTED → USING (timeout) → WAITING → CYCLING."""
+        sm.process_frame(cat_detected=True)
+        clock.advance(50)  # promote to USING
+        sm.process_frame(cat_detected=False)
+        assert sm.status == Status.USING
+
+        clock.advance(50)  # past use_threshold from promotion
+        sm.process_frame(cat_detected=False)
+        assert sm.status == Status.WAITING
+
+        clock.advance(375)  # past wait_threshold from promotion
+        actions = sm.process_frame(cat_detected=False)
+        assert sm.status == Status.COMPLETE
+        assert ("cycle", None) in actions
+
 
 class TestDoubleDetection:
     def test_cat_exit_no_second_detected_notification(self, sm, clock):
-        """Cat enters (DETECTED), goes inside box (invisible for 60s),
+        """Cat enters (DETECTED), goes inside box (invisible for 30s),
         then exits (visible again). Should NOT trigger a second DETECTED."""
         # Cat enters — first detection
         actions = sm.process_frame(cat_detected=True)
         assert sm.status == Status.DETECTED
         assert ("message", "DETECTED") in actions
 
-        # Cat inside box, invisible for 60s
-        clock.advance(60)
+        # Cat inside box, invisible for 30s (before detected_timeout)
+        clock.advance(30)
         sm.process_frame(cat_detected=False)
-        # Should still be DETECTED (detected_timeout is 300s)
         assert sm.status == Status.DETECTED
 
         # Cat exits — visible again
@@ -297,67 +315,18 @@ class TestDoubleDetection:
         assert ("message", "DETECTED") not in actions
         assert sm.status == Status.DETECTED
 
-    def test_cat_exit_after_long_stay_no_second_detected(self, sm, clock):
-        """Cat enters, stays 4 minutes (invisible), exits. Still one DETECTED."""
+    def test_no_regression_to_detected_after_timeout_promotion(self, sm, clock):
+        """After DETECTED → USING timeout promotion, a new detection
+        should NOT regress back to DETECTED."""
         actions = sm.process_frame(cat_detected=True)
         assert ("message", "DETECTED") in actions
 
-        # Cat inside box for 4 minutes
-        clock.advance(240)
+        # Cat inside box — promoted to USING after timeout
+        clock.advance(50)
         sm.process_frame(cat_detected=False)
-        assert sm.status == Status.DETECTED
+        assert sm.status == Status.USING
 
-        # Cat exits — visible again
+        # Cat exits — visible again (occupied_frames still < 15)
         actions = sm.process_frame(cat_detected=True)
+        assert sm.status == Status.USING  # stays USING, no regression
         assert ("message", "DETECTED") not in actions
-
-
-class TestFullCycleEntryOnlyVisibility:
-    def test_entry_detection_silence_exit_leads_to_cycle(self, sm, clock):
-        """Simulate real scenario: cat seen on entry, invisible inside box,
-        seen on exit, then system waits and cycles."""
-        # Cat enters — brief detection (3 frames)
-        sm.process_frame(cat_detected=True)
-        sm.process_frame(cat_detected=True)
-        sm.process_frame(cat_detected=True)
-        assert sm.status == Status.DETECTED
-
-        # Cat inside box — invisible for 3 minutes
-        clock.advance(180)
-        sm.process_frame(cat_detected=False)
-        assert sm.status == Status.DETECTED
-
-        # Cat exits — brief detection (2 frames)
-        sm.process_frame(cat_detected=True)
-        sm.process_frame(cat_detected=True)
-        assert sm.status == Status.DETECTED
-
-        # Cat gone — wait for detected_timeout (300s from last detection)
-        clock.advance(305)
-        actions = sm.process_frame(cat_detected=False)
-        assert sm.status == Status.WAITING
-        assert ("message", "WAITING") in actions
-
-        # Wait for wait_threshold (420s from last detection)
-        clock.advance(120)  # total 425s from last detection
-        actions = sm.process_frame(cat_detected=False)
-        assert sm.status == Status.COMPLETE
-        assert ("cycle", None) in actions
-
-    def test_single_frame_entry_still_cycles(self, sm, clock):
-        """Even a single detection frame should eventually lead to a cycle
-        if no further activity is detected."""
-        actions = sm.process_frame(cat_detected=True)
-        assert sm.status == Status.DETECTED
-        assert ("message", "DETECTED") in actions
-
-        # No more detections — wait for detected_timeout
-        clock.advance(305)
-        actions = sm.process_frame(cat_detected=False)
-        assert sm.status == Status.WAITING
-
-        # Wait for wait_threshold
-        clock.advance(120)
-        actions = sm.process_frame(cat_detected=False)
-        assert sm.status == Status.COMPLETE
-        assert ("cycle", None) in actions

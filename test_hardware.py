@@ -138,8 +138,7 @@ def run_hardware_test(model='models/efficientdet_lite0.tflite', camera_id=0):
                     utils.cycle()
                     motor_cycled = True
 
-            # Done once motor has cycled and we're back to IDLE,
-            # or if we've reached COMPLETE with a successful motor cycle
+            # Done once motor has cycled and we're back to IDLE
             if motor_cycled and sm.status == Status.IDLE:
                 print(f"\n  --- [{elapsed:5.1f}s] Back to IDLE. Test complete.")
                 break
