@@ -98,7 +98,7 @@ def run(model: str, camera_id: int, width: int, height: int, num_threads: int,
 
         # Execute actions returned by the state machine
         for action, status_name in actions:
-            if action == "message":
+            if action == "message" and status_name in ("DETECTED", "COMPLETE"):
                 utils.send_message(status_name, image)
             elif action == "cycle":
                 utils.cycle()
