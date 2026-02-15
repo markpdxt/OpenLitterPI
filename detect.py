@@ -31,13 +31,7 @@ TARGET_LABELS = {'cat', 'teddy bear'}
 def run(model: str, camera_id: int, width: int, height: int, num_threads: int,
         enable_edgetpu: bool, display: bool) -> None:
 
-    sm = LitterBoxStateMachine(
-        occupied_frames_threshold=15,
-        use_threshold=45,
-        wait_threshold=60 * 7,
-        reset_threshold=60 * 8,
-        detected_timeout=45,
-    )
+    sm = LitterBoxStateMachine()
 
     isStartup = True
 
@@ -104,7 +98,7 @@ def run(model: str, camera_id: int, width: int, height: int, num_threads: int,
 
         # Execute actions returned by the state machine
         for action, status_name in actions:
-            if action == "message":
+            if action == "message" and status_name in ("DETECTED", "COMPLETE"):
                 utils.send_message(status_name, image)
             elif action == "cycle":
                 utils.cycle()
