@@ -168,7 +168,7 @@ python3 cycle.py
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `rotate1` | 54 sec | Forward rotation (sift) |
-| `rotate2` | 62 sec | Reverse rotation (dump) |
+| `rotate2` | 65 sec | Reverse rotation (dump) |
 | `rotate3` | 7.28 sec | Return to home position |
 | `speed` | 1.0 | Motor speed (0.0 - 1.0) |
 
