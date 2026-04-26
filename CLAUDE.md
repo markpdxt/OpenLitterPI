@@ -75,6 +75,7 @@ USB Camera → detect.py (main loop) → TFLite model → cat_detected boolean
 - **DETECTED promotes to USING after timeout** - if the cat is detected but then becomes invisible (entered the box), after `detected_timeout` (45s) the system promotes to USING and resets the timer so use_threshold starts fresh
 - **Detection is boolean per frame** - multiple detections in a single frame are collapsed to a single `True` in `detect.py` before reaching the state machine
 - **Motor on M3 port** - three-phase cycle: forward 54s (sift), reverse 65s (dump), forward 7.28s (home)
+- **Visual homing after cycle** - `homing.py` uses two colored markers (one on bin, one on frame) to correct bin drift after each motor cycle. Detects markers via HSV color thresholding, nudges motor until markers are horizontally aligned. No calibration file needed.
 
 ### Thresholds (production defaults in detect.py)
 
@@ -86,8 +87,20 @@ USB Camera → detect.py (main loop) → TFLite model → cat_detected boolean
 | `wait_threshold` | 420s (7 min) | No-detection time before CYCLING |
 | `reset_threshold` | 480s (8 min) | Global safety timeout back to IDLE |
 
+### Visual Homing (`homing.py`)
+
+After each motor cycle, the system uses the camera to correct bin drift:
+1. Two bright colored markers (fluorescent tape) — one on the bin, one on the stationary frame
+2. Camera captures a frame, HSV thresholds to find both markers
+3. Compares x-coordinates of the two marker centroids
+4. If misaligned: nudges motor (0.1s at 40% speed), waits 0.3s, rechecks
+5. Repeats up to 20 times, then accepts position if still misaligned
+
+HSV range defaults to fluorescent green (`[35,100,100]` to `[85,255,255]`). Tune constants in `homing.py` for your marker color.
+
 ### Test Structure
 
 - `test_state_machine.py` - comprehensive unit tests using `FakeClock` for time control, no hardware needed
-- `test_hardware.py` - integration test on Pi with shortened thresholds (~30s full cycle)
+- `test_homing.py` - homing unit tests using synthetic images and mock camera/motor, no hardware needed
+- `test_hardware.py` - integration test on Pi with shortened thresholds (~30s full cycle), includes visual homing
 - `tests/test_basic.py` - import and configuration validation

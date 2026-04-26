@@ -37,6 +37,7 @@ from tflite_support.task import vision
 from tflite_support.task import processor
 from state_machine import LitterBoxStateMachine, Status
 import utils
+import homing
 
 TARGET_LABELS = {'cat', 'teddy bear'}
 
@@ -51,9 +52,8 @@ TEST_CONFIG = {
 TIMEOUT = 200  # max seconds (motor cycle takes ~127s)
 
 
-def run_hardware_test(model='models/efficientdet_lite0.tflite', camera_id=0):
-    sm = LitterBoxStateMachine(**TEST_CONFIG)
-
+def run_hardware_test(model='models/efficientdet_lite0.tflite', camera_id=0,
+                     skip_detection=False):
     cap = cv2.VideoCapture(camera_id)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -61,6 +61,35 @@ def run_hardware_test(model='models/efficientdet_lite0.tflite', camera_id=0):
     if not cap.isOpened():
         print("FAIL: Cannot open camera")
         return False
+
+    if skip_detection:
+        print("=" * 50)
+        print("  OpenLitterPI Cycle-Only Test (--cycle-only)")
+        print("=" * 50)
+        print()
+        print("  Skipping detection, running motor cycle + homing directly.")
+        print("  Press Ctrl+C to abort at any time")
+        print("=" * 50)
+        print()
+
+        try:
+            print("  *** MOTOR CYCLING ***")
+            utils.cycle()
+            print("  *** VISUAL HOMING ***")
+            homed = homing.home(cap)
+            print(f"  *** HOMING: {'ALIGNED' if homed else 'FAILED'} ***")
+        except KeyboardInterrupt:
+            print("\n\nAborted by user.")
+        finally:
+            cap.release()
+
+        print()
+        print("=" * 50)
+        print(f"  RESULT: {'PASS' if homed else 'FAIL'} - Cycle + homing")
+        print("=" * 50)
+        return homed
+
+    sm = LitterBoxStateMachine(**TEST_CONFIG)
 
     base_options = core.BaseOptions(
         file_name=model, use_coral=False, num_threads=4)
@@ -137,6 +166,9 @@ def run_hardware_test(model='models/efficientdet_lite0.tflite', camera_id=0):
                     print(f"  *** [{elapsed:5.1f}s] MOTOR CYCLING ***")
                     utils.cycle()
                     motor_cycled = True
+                    print(f"  *** [{elapsed:5.1f}s] VISUAL HOMING ***")
+                    homed = homing.home(cap)
+                    print(f"  *** HOMING: {'ALIGNED' if homed else 'FAILED'} ***")
 
             # Done once motor has cycled and we're back to IDLE
             if motor_cycled and sm.status == Status.IDLE:
@@ -178,5 +210,6 @@ def run_hardware_test(model='models/efficientdet_lite0.tflite', camera_id=0):
 
 
 if __name__ == '__main__':
-    success = run_hardware_test()
+    skip_detect = '--cycle-only' in sys.argv
+    success = run_hardware_test(skip_detection=skip_detect)
     sys.exit(0 if success else 1)

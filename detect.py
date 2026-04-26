@@ -23,6 +23,7 @@ from tflite_support.task import core
 from tflite_support.task import vision
 from tflite_support.task import processor
 import utils
+import homing
 from state_machine import LitterBoxStateMachine
 
 TARGET_LABELS = {'cat', 'teddy bear'}
@@ -102,6 +103,7 @@ def run(model: str, camera_id: int, width: int, height: int, num_threads: int,
                 utils.send_message(status_name, image)
             elif action == "cycle":
                 utils.cycle()
+                homing.home(cap)
 
         # Calculate the FPS
         if counter % fps_avg_frame_count == 0:
