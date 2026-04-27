@@ -74,7 +74,7 @@ USB Camera → detect.py (main loop) → TFLite model → cat_detected boolean
 - **Frame counting never decrements** - once a detection increments `occupied_frames`, it holds steady so intermittent camera detections accumulate toward the threshold (15 frames), matching original behavior
 - **DETECTED promotes to USING after timeout** - if the cat is detected but then becomes invisible (entered the box), after `detected_timeout` (45s) the system promotes to USING and resets the timer so use_threshold starts fresh
 - **Detection is boolean per frame** - multiple detections in a single frame are collapsed to a single `True` in `detect.py` before reaching the state machine
-- **Motor on M3 port** - three-phase cycle: forward 54s (sift), reverse 65s (dump), forward 7.28s (home)
+- **Motor on M3 port** - three-phase cycle: forward 58s (sift), reverse 69s (dump), forward 8s (home)
 - **Visual homing after cycle** - `homing.py` uses two colored markers (one on bin, one on frame) to correct bin drift after each motor cycle. Detects markers via HSV color thresholding, nudges motor until markers are horizontally aligned. No calibration file needed.
 
 ### Thresholds (production defaults in detect.py)

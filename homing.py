@@ -43,7 +43,7 @@ ROI_X_FRACTION = 0.35
 
 # Known x-offset between markers when bin is physically aligned.
 # Measured as compute_alignment_error() when bin is in correct position.
-ALIGNED_OFFSET = 39
+ALIGNED_OFFSET = 31
 
 
 def detect_markers(frame, hsv_lower=None, hsv_upper=None, min_area=MARKER_MIN_AREA,

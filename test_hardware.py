@@ -63,18 +63,24 @@ def run_hardware_test(model='models/efficientdet_lite0.tflite', camera_id=0,
         return False
 
     if skip_detection:
+        homing_only = '--homing-only' in sys.argv if hasattr(sys, 'argv') else False
+        label = "Homing-Only" if homing_only else "Cycle-Only"
         print("=" * 50)
-        print("  OpenLitterPI Cycle-Only Test (--cycle-only)")
+        print(f"  OpenLitterPI {label} Test")
         print("=" * 50)
         print()
-        print("  Skipping detection, running motor cycle + homing directly.")
+        if homing_only:
+            print("  Skipping detection and motor cycle, running homing only.")
+        else:
+            print("  Skipping detection, running motor cycle + homing directly.")
         print("  Press Ctrl+C to abort at any time")
         print("=" * 50)
         print()
 
         try:
-            print("  *** MOTOR CYCLING ***")
-            utils.cycle()
+            if not homing_only:
+                print("  *** MOTOR CYCLING ***")
+                utils.cycle()
             print("  *** VISUAL HOMING ***")
             homed = homing.home(cap)
             print(f"  *** HOMING: {'ALIGNED' if homed else 'FAILED'} ***")
@@ -85,7 +91,7 @@ def run_hardware_test(model='models/efficientdet_lite0.tflite', camera_id=0,
 
         print()
         print("=" * 50)
-        print(f"  RESULT: {'PASS' if homed else 'FAIL'} - Cycle + homing")
+        print(f"  RESULT: {'PASS' if homed else 'FAIL'} - {label}")
         print("=" * 50)
         return homed
 
@@ -210,6 +216,6 @@ def run_hardware_test(model='models/efficientdet_lite0.tflite', camera_id=0,
 
 
 if __name__ == '__main__':
-    skip_detect = '--cycle-only' in sys.argv
+    skip_detect = '--cycle-only' in sys.argv or '--homing-only' in sys.argv
     success = run_hardware_test(skip_detection=skip_detect)
     sys.exit(0 if success else 1)

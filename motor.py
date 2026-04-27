@@ -24,7 +24,7 @@ import board
 from adafruit_motorkit import MotorKit
 
 
-def cycle(rotate1=54.0, rotate2=65.0, rotate3=7.28, speed=1.0, delay=2.0):
+def cycle(rotate1=58.0, rotate2=69.0, rotate3=8.0, speed=1.0, delay=2.0):
     """
     Execute a full cleaning cycle.
     
