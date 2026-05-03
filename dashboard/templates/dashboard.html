@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="refresh" content="5">
+    <title>OpenLitterPI Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #1a1a2e;
+            color: #e0e0e0;
+            padding: 20px;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        h1 { color: #fff; margin-bottom: 5px; font-size: 1.5em; }
+        .uptime { color: #888; font-size: 0.85em; margin-bottom: 20px; }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+        .card {
+            background: #16213e;
+            border-radius: 10px;
+            padding: 18px;
+            border: 1px solid #0f3460;
+        }
+        .card h2 {
+            font-size: 0.85em;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+        }
+        .card-full { grid-column: 1 / -1; }
+
+        /* Status badge */
+        .status-badge {
+            display: inline-block;
+            padding: 8px 20px;
+            border-radius: 6px;
+            font-size: 1.4em;
+            font-weight: bold;
+            letter-spacing: 2px;
+        }
+        .status-IDLE { background: #2d6a4f; color: #b7e4c7; }
+        .status-DETECTED { background: #e9c46a; color: #1a1a2e; }
+        .status-USING { background: #f4a261; color: #1a1a2e; }
+        .status-WAITING { background: #e76f51; color: #fff; }
+        .status-CYCLING { background: #d62828; color: #fff; }
+        .status-COMPLETE { background: #457b9d; color: #fff; }
+        .status-info {
+            margin-top: 10px;
+            font-size: 0.9em;
+            color: #aaa;
+        }
+        .status-info span { margin-right: 20px; }
+
+        /* Stats */
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 0;
+            border-bottom: 1px solid #0f3460;
+        }
+        .stat-row:last-child { border-bottom: none; }
+        .stat-label { color: #888; }
+        .stat-value { color: #fff; font-weight: 600; }
+
+        /* Homing table */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85em;
+        }
+        th {
+            text-align: left;
+            color: #888;
+            font-weight: 500;
+            padding: 6px 8px;
+            border-bottom: 1px solid #0f3460;
+        }
+        td {
+            padding: 6px 8px;
+            border-bottom: 1px solid #0f346033;
+        }
+        .aligned { color: #b7e4c7; }
+        .failed { color: #e76f51; }
+
+        /* Activity log */
+        .log-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+        .log-table td { padding: 5px 8px; border-bottom: 1px solid #0f346033; }
+        .log-table td:first-child { color: #666; white-space: nowrap; }
+        .log-table td:nth-child(2) { color: #aaa; text-align: center; }
+        .log-table td:last-child { color: #ddd; text-align: right; }
+
+        @media (max-width: 600px) {
+            .grid { grid-template-columns: 1fr; }
+            body { padding: 10px; }
+        }
+    </style>
+</head>
+<body>
+    <h1>OpenLitterPI Dashboard</h1>
+    <div class="uptime">Uptime: {{ uptime|duration }} | Auto-refresh: 5s</div>
+
+    <!-- Current State -->
+    <div class="card" style="margin-bottom: 15px;">
+        <h2>Current State</h2>
+        <div class="status-badge status-{{ live.status }}">{{ live.status }}</div>
+        <div class="status-info">
+            <span>Elapsed: {{ live.elapsed_time }}s</span>
+            <span>Frames: {{ live.occupied_frames }}</span>
+            <span>FPS: {{ '%.1f'|format(live.fps) }}</span>
+        </div>
+    </div>
+
+    <div class="grid">
+        <!-- Cycle Stats -->
+        <div class="card">
+            <h2>Cycle Stats</h2>
+            <div class="stat-row">
+                <span class="stat-label">Total Cycles</span>
+                <span class="stat-value">{{ cycle_stats.total_cycles }}</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Avg Duration</span>
+                <span class="stat-value">{{ cycle_stats.avg_duration|duration }}</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Last Cycle</span>
+                <span class="stat-value">{{ cycle_stats.last_cycle_time|timestamp }}</span>
+            </div>
+        </div>
+
+        <!-- Detection Stats -->
+        <div class="card">
+            <h2>Today's Activity</h2>
+            <div class="stat-row">
+                <span class="stat-label">Detections</span>
+                <span class="stat-value">{{ detection_stats.detections_today }}</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-label">Usages</span>
+                <span class="stat-value">{{ detection_stats.usages_today }}</span>
+            </div>
+        </div>
+
+        <!-- Homing Results -->
+        <div class="card card-full">
+            <h2>Recent Homing Results</h2>
+            {% if homing_stats %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Result</th>
+                        <th>Error</th>
+                        <th>Attempts</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for h in homing_stats %}
+                    <tr>
+                        <td>{{ h.timestamp|timestamp }}</td>
+                        <td class="{{ 'aligned' if h.aligned else 'failed' }}">
+                            {{ 'Aligned' if h.aligned else 'Failed' }}
+                        </td>
+                        <td>{{ h.final_error_px }}px</td>
+                        <td>{{ h.attempts }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div style="color: #666;">No homing data yet</div>
+            {% endif %}
+        </div>
+
+        <!-- Activity Log -->
+        <div class="card card-full">
+            <h2>Activity Log</h2>
+            {% if recent %}
+            <table class="log-table">
+            {% for event in recent %}
+                <tr>
+                    <td>{{ event.timestamp|timestamp }}</td>
+                    <td>{{ event.event_type }}</td>
+                    <td>
+                        {% if event.event_type == 'state_change' %}
+                            {{ event.detail.get('old', '?') }} &rarr; {{ event.detail.get('new', '?') }}
+                        {% elif event.event_type == 'cycle_complete' %}
+                            {{ event.detail.get('duration_seconds', 0)|round(1) }}s
+                        {% elif event.event_type == 'homing_result' %}
+                            {{ 'Aligned' if event.detail.get('aligned') else 'Failed' }}
+                            ({{ event.detail.get('final_error_px', '?') }}px)
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+            </table>
+            {% else %}
+            <div style="color: #666;">No events yet</div>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>

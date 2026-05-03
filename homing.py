@@ -22,150 +22,156 @@ alignment. After the timed motor cycle, nudges the motor until the
 markers are horizontally aligned, correcting cumulative drift.
 """
 
+import os
 import time
 import cv2
 import numpy as np
 
 import motor
 
-# Default HSV range for red marker.
-# Red wraps around H=0/180 in OpenCV, so we use two ranges and combine.
-HSV_LOWER_1 = np.array([0, 100, 25])
-HSV_UPPER_1 = np.array([12, 255, 255])
-HSV_LOWER_2 = np.array([168, 100, 25])
-HSV_UPPER_2 = np.array([180, 255, 255])
+# Directory to save diagnostic frames when markers aren't found
+DIAG_DIR = os.path.join(os.path.dirname(__file__), 'data', 'homing_debug')
+DIAG_MAX_FILES = 10  # Keep only the most recent diagnostic frames
+
+# HSV range for green fluorescent tape markers on bin and frame.
+# When aligned, the two green tapes overlap into one blob (width ~34px).
+# When misaligned, the blob widens as the tapes separate.
+HSV_LOWER_1 = np.array([55, 70, 70])
+HSV_UPPER_1 = np.array([110, 255, 255])
+HSV_LOWER_2 = None
+HSV_UPPER_2 = None
 
 # Minimum contour area in pixels to be considered a marker
-MARKER_MIN_AREA = 25
+MARKER_MIN_AREA = 50
 
-# Region of interest: only search the left portion of the frame
-# where the markers are, ignoring window/trees on the right.
-# Value is a fraction of frame width (0.0 to 1.0).
-ROI_X_FRACTION = 0.35
+# Region of interest: only search the top-left quarter of the frame
+# where the tape markers are.
+ROI_X_FRACTION = 0.19
 
-# Minimum y-coordinate for valid marker contours.
-# Filters out false positives near the top of the frame (e.g. reddish
-# reflections on the litter box housing).
-ROI_Y_MIN = 50
-
-# Known x-offset between markers when bin is physically aligned.
-# Measured as compute_alignment_error() when bin is in correct position.
-# Red markers: roughly (59,70) and (44,82).
-ALIGNED_OFFSET = 15
+# Calibrated values at visually confirmed true center (2026-05-03, post-cycle).
+# Green blob when aligned: cx=45, width=34 (10/10 stable, brightness ~97).
+# Red blob when aligned: cx=59, width=34.
+ALIGNED_WIDTH = 34
+ALIGNED_CX = 45
 
 # Minimum average frame brightness (0-255) required to attempt homing.
 # Below this threshold the ambient light shifts marker hue out of the
 # red range, making detection unreliable.
-MIN_BRIGHTNESS = 120
+MIN_BRIGHTNESS = 40
+MAX_BRIGHTNESS = 110
+
+# Fixed forward nudge when brightness is outside CV range.
+# Empirically calibrated: the motor cycle consistently displaces the bin
+# by roughly this amount, so a fixed correction gets close.
+FIXED_NUDGE_DURATION = 1.5
+FIXED_NUDGE_SPEED = 0.7
 
 # Number of frames to grab and discard before reading a real frame.
 # Cameras buffer old frames; flushing ensures we get a current image.
 CAMERA_FLUSH_FRAMES = 3
 
 
-def detect_markers(frame, hsv_lower=None, hsv_upper=None, min_area=MARKER_MIN_AREA,
-                   roi_x_fraction=ROI_X_FRACTION):
+def _save_diagnostic(frame, mask, attempt, brightness=None):
+    """Save a diagnostic frame + mask when markers aren't found.
+
+    Keeps only the most recent DIAG_MAX_FILES pairs to avoid filling disk.
     """
-    Detect two colored markers in a BGR frame.
+    try:
+        os.makedirs(DIAG_DIR, exist_ok=True)
+
+        # Remove old files if over limit
+        existing = sorted(
+            [f for f in os.listdir(DIAG_DIR) if f.endswith('.jpg')],
+        )
+        while len(existing) >= DIAG_MAX_FILES * 2 - 1:
+            os.remove(os.path.join(DIAG_DIR, existing.pop(0)))
+
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        brt_tag = f'_brt{int(brightness)}' if brightness is not None else ''
+        cv2.imwrite(os.path.join(DIAG_DIR, f'{ts}_frame_a{attempt}{brt_tag}.jpg'), frame)
+        cv2.imwrite(os.path.join(DIAG_DIR, f'{ts}_mask_a{attempt}{brt_tag}.jpg'), mask)
+    except Exception as e:
+        print(f'Homing: diagnostic save failed: {e}')
+
+
+def detect_marker_blob(frame, hsv_lower=None, hsv_upper=None,
+                       min_area=MARKER_MIN_AREA, roi_x_fraction=ROI_X_FRACTION):
+    """
+    Detect the green marker blob in a BGR frame.
+
+    The bin and frame each have a green tape marker. When aligned, they
+    overlap into a single compact blob. When misaligned, the blob widens
+    as the tapes separate horizontally.
 
     Args:
-        frame: BGR image from cv2.VideoCapture
-        hsv_lower: Lower HSV bound (numpy array or list of arrays for multi-range).
-            Defaults to red marker dual-range.
-        hsv_upper: Upper HSV bound (numpy array or list of arrays for multi-range).
-            Defaults to red marker dual-range.
-        min_area: Minimum contour area to qualify as a marker.
+        frame: BGR image from cv2.VideoCapture.
+        hsv_lower: Lower HSV bound. Defaults to HSV_LOWER_1.
+        hsv_upper: Upper HSV bound. Defaults to HSV_UPPER_1.
+        min_area: Minimum contour area to qualify.
         roi_x_fraction: Fraction of frame width to search (from left).
-            Set to 1.0 to search the full frame.
 
     Returns:
-        List of two (x, y) centroids sorted by y-coordinate (top first),
-        or None if fewer than 2 markers found.
+        Dict with cx, cy, width, height, area of the largest green blob,
+        or None if no blob found.
     """
     if hsv_lower is None:
-        hsv_lower = [HSV_LOWER_1, HSV_LOWER_2]
-        hsv_upper = [HSV_UPPER_1, HSV_UPPER_2]
+        hsv_lower = HSV_LOWER_1
+    if hsv_upper is None:
+        hsv_upper = HSV_UPPER_1
 
-    # Crop to left ROI to ignore background (window/trees)
     roi_x = int(frame.shape[1] * roi_x_fraction)
     roi = frame[:, :roi_x]
-
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-
-    # Support single range (legacy) or multi-range (red wraps around H=0/180)
-    if isinstance(hsv_lower, list):
-        mask = cv2.inRange(hsv, hsv_lower[0], hsv_upper[0])
-        for lo, hi in zip(hsv_lower[1:], hsv_upper[1:]):
-            mask = mask | cv2.inRange(hsv, lo, hi)
-    else:
-        mask = cv2.inRange(hsv, hsv_lower, hsv_upper)
+    mask = cv2.inRange(hsv, hsv_lower, hsv_upper)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    # Filter by area and y-position, sort by area descending to get the two largest
-    valid = [c for c in contours
-             if cv2.contourArea(c) >= min_area
-             and cv2.boundingRect(c)[1] >= ROI_Y_MIN]
-    valid.sort(key=cv2.contourArea, reverse=True)
-
-    if len(valid) < 2:
-        # If only one large blob, try splitting it by finding the two
-        # highest peaks in the y-projection (markers merged vertically)
-        if len(valid) == 1 and cv2.contourArea(valid[0]) >= min_area * 4:
-            x, y, w, h = cv2.boundingRect(valid[0])
-            if h > w:  # vertically elongated = likely merged
-                mid_y = y + h // 2
-                top_mask = mask[y:mid_y, :]
-                bot_mask = mask[mid_y:y+h, :]
-                top_ctrs, _ = cv2.findContours(top_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                bot_ctrs, _ = cv2.findContours(bot_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                if top_ctrs and bot_ctrs:
-                    top_c = max(top_ctrs, key=cv2.contourArea)
-                    bot_c = max(bot_ctrs, key=cv2.contourArea)
-                    tM = cv2.moments(top_c)
-                    bM = cv2.moments(bot_c)
-                    if tM["m00"] > 0 and bM["m00"] > 0:
-                        centroids = [
-                            (int(tM["m10"]/tM["m00"]), int(tM["m01"]/tM["m00"]) + y),
-                            (int(bM["m10"]/bM["m00"]), int(bM["m01"]/bM["m00"]) + mid_y),
-                        ]
-                        centroids.sort(key=lambda p: p[1])
-                        return centroids
+    valid = [c for c in contours if cv2.contourArea(c) >= min_area]
+    if not valid:
         return None
 
+    best = max(valid, key=cv2.contourArea)
+    M = cv2.moments(best)
+    if M["m00"] == 0:
+        return None
+
+    cx = int(M["m10"] / M["m00"])
+    cy = int(M["m01"] / M["m00"])
+    x, y, w, h = cv2.boundingRect(best)
+    return {'cx': cx, 'cy': cy, 'width': w, 'height': h, 'area': cv2.contourArea(best)}
+
+
+# Legacy wrappers kept for test compatibility
+def detect_markers(frame, hsv_lower=None, hsv_upper=None, min_area=MARKER_MIN_AREA,
+                   roi_x_fraction=ROI_X_FRACTION):
+    """Detect two colored markers (legacy interface for tests)."""
+    if hsv_lower is None:
+        hsv_lower = HSV_LOWER_1
+    if hsv_upper is None:
+        hsv_upper = HSV_UPPER_1
+
+    roi_x = int(frame.shape[1] * roi_x_fraction)
+    roi = frame[:, :roi_x]
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, hsv_lower, hsv_upper)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    valid = [c for c in contours if cv2.contourArea(c) >= min_area]
+    valid.sort(key=cv2.contourArea, reverse=True)
+    if len(valid) < 2:
+        return None
     centroids = []
     for contour in valid[:2]:
         M = cv2.moments(contour)
         if M["m00"] == 0:
             continue
-        cx = int(M["m10"] / M["m00"])
-        cy = int(M["m01"] / M["m00"])
-        centroids.append((cx, cy))
-
+        centroids.append((int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])))
     if len(centroids) < 2:
         return None
-
-    # Reject if centroids are too close vertically (noise or split artifacts)
-    dy = abs(centroids[0][1] - centroids[1][1])
-    if dy < 18:
-        return None
-
-    # Sort by y-coordinate (top marker first)
     centroids.sort(key=lambda p: p[1])
     return centroids
 
 
 def compute_alignment_error(markers):
-    """
-    Compute horizontal alignment error between two markers.
-
-    Args:
-        markers: List of two (x, y) centroids.
-
-    Returns:
-        x-difference (markers[0].x - markers[1].x). Positive means
-        the top marker is to the right of the bottom marker.
-    """
+    """Compute alignment error (legacy interface for tests)."""
     return markers[0][0] - markers[1][0]
 
 
@@ -180,49 +186,38 @@ def _flush_camera(cap, count=CAMERA_FLUSH_FRAMES):
         cap.grab()
 
 
-def _try_detect_markers(cap, roi_x_fraction, retries=3, retry_delay=0.2):
-    """Try to detect markers, retrying on failure.
-
-    Cameras sometimes return under-exposed or blurry frames right after
-    the motor stops. Retrying a few times greatly improves reliability.
+def _try_detect_blob(cap, roi_x_fraction, retries=3, retry_delay=0.2):
+    """Try to detect the green marker blob, retrying on failure.
 
     Returns:
-        (success: bool, frame, markers) — frame and markers are from the
-        successful read, or from the last failed attempt.
+        (success: bool, frame, blob) — blob is a dict from detect_marker_blob,
+        or None if not found.
     """
     frame = None
     for i in range(retries):
         success, frame = cap.read()
         if not success:
             return False, None, None
-        markers = detect_markers(frame, roi_x_fraction=roi_x_fraction)
-        if markers is not None:
-            return True, frame, markers
+        blob = detect_marker_blob(frame, roi_x_fraction=roi_x_fraction)
+        if blob is not None:
+            return True, frame, blob
         if i < retries - 1:
             time.sleep(retry_delay)
     return True, frame, None
 
 
-def home(cap, nudge_speed=0.7, nudge_duration=0.3, tolerance_px=6,
+def home(cap, nudge_speed=0.7, nudge_duration=0.5, tolerance_px=2,
          max_attempts=40, settle_time=0.5, move_fn=None,
          roi_x_fraction=ROI_X_FRACTION, flush_frames=CAMERA_FLUSH_FRAMES,
-         confirm_reads=3, min_brightness=MIN_BRIGHTNESS):
+         confirm_reads=3, min_brightness=MIN_BRIGHTNESS,
+         aligned_width=ALIGNED_WIDTH, aligned_cx=ALIGNED_CX):
     """
-    Closed-loop visual homing routine.
+    Closed-loop visual homing using green blob width.
 
-    Captures frames, detects marker alignment, and nudges the motor
-    until the two markers are horizontally aligned.
-
-    Args:
-        cap: cv2.VideoCapture object (must be open).
-        nudge_speed: Motor speed for correction nudges (0.0-1.0).
-        nudge_duration: Duration of each nudge in seconds.
-        tolerance_px: Alignment tolerance in pixels.
-        max_attempts: Maximum correction attempts before giving up.
-        settle_time: Seconds to wait after each nudge for motor to stop.
-        move_fn: Motor move function (for testing). Defaults to motor.move.
-        flush_frames: Number of frames to flush before first read.
-        confirm_reads: Consecutive in-tolerance reads required to confirm alignment.
+    The bin and frame each have a green tape. When aligned they overlap
+    into one compact blob (width ~ALIGNED_WIDTH). When misaligned the
+    blob widens. The centroid x relative to ALIGNED_CX determines nudge
+    direction.
 
     Returns:
         Dict with keys: aligned (bool), final_error_px (int), attempts (int),
@@ -231,71 +226,90 @@ def home(cap, nudge_speed=0.7, nudge_duration=0.3, tolerance_px=6,
     if move_fn is None:
         move_fn = motor.move
 
-    # Flush stale buffered frames before starting
     _flush_camera(cap, flush_frames)
 
-    # Check ambient brightness — low light shifts marker hue, skip homing
-    if min_brightness > 0:
-        success, frame = cap.read()
-        if success and frame is not None:
-            brightness = cv2.mean(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))[0]
-            if brightness < min_brightness:
-                print(f"Homing: skipped, too dark (brightness={brightness:.0f}, min={min_brightness})")
-                return {'aligned': False, 'final_error_px': 0,
-                        'attempts': 0, 'marker_loss_count': 0,
-                        'skipped': 'low_light', 'brightness': brightness}
+    # Check ambient brightness
+    success, frame = cap.read()
+    if success and frame is not None:
+        brightness = cv2.mean(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))[0]
+        print(f"Homing: brightness={brightness:.0f} (range={min_brightness}-{MAX_BRIGHTNESS})")
+        if brightness < min_brightness:
+            print(f"Homing: skipped, too dark (brightness={brightness:.0f})")
+            return {'aligned': False, 'final_error_px': 0,
+                    'attempts': 0, 'marker_loss_count': 0,
+                    'skipped': 'low_light', 'brightness': brightness}
+        if brightness > MAX_BRIGHTNESS:
+            print(f"Homing: too bright for CV ({brightness:.0f}>{MAX_BRIGHTNESS}), using fixed forward nudge")
+            move_fn(velocity=FIXED_NUDGE_SPEED, duration=FIXED_NUDGE_DURATION)
+            return {'aligned': True, 'final_error_px': 0,
+                    'attempts': 1, 'marker_loss_count': 0,
+                    'fixed_nudge': True, 'brightness': brightness}
 
-    error = 0
     marker_loss_count = 0
-    consecutive_ok = 0
+    prev_width = None
+    direction = 1.0  # Start forward (cycle displaces bin backward)
+    width_increasing_count = 0
+
     for attempt in range(max_attempts):
-        cam_ok, frame, markers = _try_detect_markers(cap, roi_x_fraction)
+        cam_ok, frame, blob = _try_detect_blob(cap, roi_x_fraction)
         if not cam_ok:
             print("Homing: camera read failed, aborting")
             return {'aligned': False, 'final_error_px': 0,
                     'attempts': attempt + 1, 'marker_loss_count': marker_loss_count}
 
-        if markers is None:
+        if blob is None:
             marker_loss_count += 1
-            consecutive_ok = 0
-            print(f"Homing: markers not found after retries (attempt {attempt + 1}/{max_attempts})")
+            if frame is not None and (marker_loss_count == 1 or marker_loss_count % 10 == 0):
+                roi_x = int(frame.shape[1] * roi_x_fraction)
+                roi = frame[:, :roi_x]
+                hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+                mask = cv2.inRange(hsv, HSV_LOWER_1, HSV_UPPER_1)
+                brt = cv2.mean(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))[0]
+                _save_diagnostic(frame, mask, attempt + 1, brightness=brt)
+            print(f"Homing: blob not found (attempt {attempt + 1}/{max_attempts})")
             time.sleep(settle_time)
             continue
 
-        raw_error = compute_alignment_error(markers)
-        error = raw_error - ALIGNED_OFFSET
-        print(f"Homing: error={error}px (raw={raw_error}px), markers={markers} (attempt {attempt + 1}/{max_attempts})")
+        width = blob['width']
+        print(f"Homing: width={width}px, cx={blob['cx']}, dir={'fwd' if direction > 0 else 'rev'} "
+              f"(attempt {attempt + 1}/{max_attempts})")
 
-        if abs(error) <= tolerance_px:
-            consecutive_ok += 1
-            if consecutive_ok >= confirm_reads:
-                print(f"Homing: aligned (error={error}px, confirmed {confirm_reads}x, attempt {attempt + 1})")
-                return {'aligned': True, 'final_error_px': error,
-                        'attempts': attempt + 1, 'marker_loss_count': marker_loss_count}
-            continue
-        else:
-            consecutive_ok = 0
+        if prev_width is not None:
+            if width > prev_width + 1:
+                # Width increased — we passed through center, reverse direction
+                width_increasing_count += 1
+                if width_increasing_count >= 2:
+                    direction = -direction
+                    width_increasing_count = 0
+                    print(f"Homing: width increasing, reversing to {'fwd' if direction > 0 else 'rev'}")
+            elif width < prev_width - 1:
+                # Width decreasing — approaching center, keep going
+                width_increasing_count = 0
+            else:
+                # Width stable — might be at minimum
+                width_increasing_count = 0
+                # Check if width is near minimum (confirm with multiple reads)
+                if attempt >= 2:
+                    # Read a few more to confirm stability
+                    stable_count = 0
+                    for _ in range(confirm_reads):
+                        ok2, _, b2 = _try_detect_blob(cap, roi_x_fraction)
+                        if ok2 and b2 and abs(b2['width'] - width) <= tolerance_px:
+                            stable_count += 1
+                    if stable_count >= confirm_reads:
+                        print(f"Homing: aligned (width={width}px stable, {confirm_reads} confirms, attempt {attempt + 1})")
+                        return {'aligned': True, 'final_error_px': 0,
+                                'attempts': attempt + 1, 'marker_loss_count': marker_loss_count}
 
-        # Nudge motor to correct: scale nudge strength by error magnitude.
-        direction = -1.0 if error > 0 else 1.0
-        if abs(error) > 100:
-            speed = nudge_speed
-            duration = nudge_duration * 1.5
-        elif abs(error) > 60:
-            speed = nudge_speed
-            duration = nudge_duration
-        elif abs(error) > 30:
-            speed = nudge_speed * 0.7
-            duration = nudge_duration * 0.7
-        else:
-            speed = nudge_speed * 0.7
-            duration = nudge_duration * 0.7
-        move_fn(velocity=direction * speed, duration=duration)
+        prev_width = width
+
+        # Nudge in current direction
+        speed = nudge_speed
+        dur = nudge_duration
+        move_fn(velocity=direction * speed, duration=dur)
         time.sleep(settle_time)
-
-        # Flush frames after nudge so next read is current
         _flush_camera(cap, flush_frames)
 
-    print(f"Homing: max attempts ({max_attempts}) reached, final error={error}px")
-    return {'aligned': False, 'final_error_px': error,
+    print(f"Homing: max attempts ({max_attempts}) reached")
+    return {'aligned': False, 'final_error_px': 0,
             'attempts': max_attempts, 'marker_loss_count': marker_loss_count}

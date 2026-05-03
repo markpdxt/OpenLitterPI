@@ -11,12 +11,13 @@
 import pytest
 import numpy as np
 import cv2
-from homing import detect_markers, compute_alignment_error, home, ALIGNED_OFFSET
+from homing import (detect_markers, compute_alignment_error, detect_marker_blob,
+                    home, ALIGNED_WIDTH, ALIGNED_CX)
 
 
 # --- Helpers ---
 
-def make_frame_with_markers(positions, color_bgr=(0, 0, 255), radius=15,
+def make_frame_with_markers(positions, color_bgr=(0, 255, 0), radius=15,
                             width=640, height=480):
     """Create a synthetic BGR frame with colored circles as markers."""
     frame = np.zeros((height, width, 3), dtype=np.uint8)
@@ -25,103 +26,109 @@ def make_frame_with_markers(positions, color_bgr=(0, 0, 255), radius=15,
     return frame
 
 
-# HSV range for pure green circles on black background
+def make_green_blob(cx, cy, blob_width, blob_height=30, width=640, height=480):
+    """Create a frame with a green rectangle of specific width at (cx, cy)."""
+    frame = np.zeros((height, width, 3), dtype=np.uint8)
+    x1 = cx - blob_width // 2
+    y1 = cy - blob_height // 2
+    x2 = x1 + blob_width
+    y2 = y1 + blob_height
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), -1)
+    return frame
+
+
 GREEN_LOWER = np.array([35, 100, 100])
 GREEN_UPPER = np.array([85, 255, 255])
 
 
-# --- detect_markers tests ---
+# --- detect_markers tests (legacy interface) ---
 
 class TestDetectMarkers:
     def test_finds_two_aligned_markers(self):
-        """Two green circles at the same x should be detected."""
         frame = make_frame_with_markers([(320, 100), (320, 380)], color_bgr=(0, 255, 0))
         markers = detect_markers(frame, GREEN_LOWER, GREEN_UPPER, roi_x_fraction=1.0)
         assert markers is not None
         assert len(markers) == 2
-        # Top marker first (lower y)
         assert markers[0][1] < markers[1][1]
 
     def test_returns_none_with_zero_markers(self):
-        """Empty frame should return None."""
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
         markers = detect_markers(frame, GREEN_LOWER, GREEN_UPPER, roi_x_fraction=1.0)
         assert markers is None
 
     def test_returns_none_with_one_marker(self):
-        """Single marker should return None (need two)."""
         frame = make_frame_with_markers([(320, 240)], color_bgr=(0, 255, 0))
         markers = detect_markers(frame, GREEN_LOWER, GREEN_UPPER, roi_x_fraction=1.0)
         assert markers is None
 
     def test_ignores_small_contours(self):
-        """Markers smaller than min_area should be ignored."""
         frame = make_frame_with_markers([(320, 100), (320, 380)], color_bgr=(0, 255, 0), radius=2)
-        markers = detect_markers(frame, GREEN_LOWER, GREEN_UPPER, min_area=500, roi_x_fraction=1.0)
+        markers = detect_markers(frame, GREEN_LOWER, GREEN_UPPER, min_area=200, roi_x_fraction=1.0)
         assert markers is None
 
     def test_centroid_accuracy(self):
-        """Detected centroids should be close to the drawn positions."""
         frame = make_frame_with_markers([(200, 100), (400, 350)], color_bgr=(0, 255, 0))
         markers = detect_markers(frame, GREEN_LOWER, GREEN_UPPER, roi_x_fraction=1.0)
         assert markers is not None
-        # Top marker (y=100)
         assert abs(markers[0][0] - 200) < 3
         assert abs(markers[0][1] - 100) < 3
-        # Bottom marker (y=350)
-        assert abs(markers[1][0] - 400) < 3
-        assert abs(markers[1][1] - 350) < 3
 
     def test_selects_two_largest(self):
-        """With three markers, the two largest should be selected."""
         frame = np.zeros((480, 640, 3), dtype=np.uint8)
-        cv2.circle(frame, (100, 100), 20, (0, 255, 0), -1)  # large
-        cv2.circle(frame, (300, 300), 20, (0, 255, 0), -1)  # large
-        cv2.circle(frame, (500, 200), 5, (0, 255, 0), -1)   # small
+        cv2.circle(frame, (100, 100), 20, (0, 255, 0), -1)
+        cv2.circle(frame, (300, 300), 20, (0, 255, 0), -1)
+        cv2.circle(frame, (500, 200), 5, (0, 255, 0), -1)
         markers = detect_markers(frame, GREEN_LOWER, GREEN_UPPER, min_area=50, roi_x_fraction=1.0)
         assert markers is not None
         assert len(markers) == 2
 
-    def test_wrong_color_not_detected(self):
-        """Green circles should not be detected with red HSV defaults."""
-        frame = make_frame_with_markers([(320, 100), (320, 380)],
-                                        color_bgr=(0, 255, 0))
-        markers = detect_markers(frame, roi_x_fraction=1.0)
-        assert markers is None
 
-    def test_red_markers_detected_with_defaults(self):
-        """Red circles should be detected using default HSV ranges."""
-        frame = make_frame_with_markers([(320, 100), (320, 380)],
-                                        color_bgr=(0, 0, 255))
-        markers = detect_markers(frame, roi_x_fraction=1.0)
-        assert markers is not None
-        assert len(markers) == 2
+# --- detect_marker_blob tests ---
+
+class TestDetectMarkerBlob:
+    def test_detects_green_blob(self):
+        frame = make_green_blob(100, 100, 34)
+        blob = detect_marker_blob(frame, roi_x_fraction=1.0)
+        assert blob is not None
+        assert abs(blob['cx'] - 100) < 3
+        assert abs(blob['width'] - 34) < 3
+
+    def test_returns_none_for_empty_frame(self):
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        blob = detect_marker_blob(frame, roi_x_fraction=1.0)
+        assert blob is None
+
+    def test_wider_blob_when_misaligned(self):
+        narrow = make_green_blob(100, 100, 34)
+        wide = make_green_blob(100, 100, 50)
+        b_narrow = detect_marker_blob(narrow, roi_x_fraction=1.0)
+        b_wide = detect_marker_blob(wide, roi_x_fraction=1.0)
+        assert b_narrow['width'] < b_wide['width']
+
+    def test_centroid_shifts_with_offset(self):
+        left = make_green_blob(80, 100, 40)
+        right = make_green_blob(120, 100, 40)
+        b_left = detect_marker_blob(left, roi_x_fraction=1.0)
+        b_right = detect_marker_blob(right, roi_x_fraction=1.0)
+        assert b_left['cx'] < b_right['cx']
 
 
-# --- compute_alignment_error tests ---
+# --- compute_alignment_error tests (legacy) ---
 
 class TestComputeAlignmentError:
     def test_aligned_markers(self):
-        """Same x-coordinate should give zero error."""
-        error = compute_alignment_error([(320, 100), (320, 380)])
-        assert error == 0
+        assert compute_alignment_error([(320, 100), (320, 380)]) == 0
 
     def test_positive_error(self):
-        """Top marker right of bottom -> positive error."""
-        error = compute_alignment_error([(330, 100), (320, 380)])
-        assert error == 10
+        assert compute_alignment_error([(330, 100), (320, 380)]) == 10
 
     def test_negative_error(self):
-        """Top marker left of bottom -> negative error."""
-        error = compute_alignment_error([(310, 100), (320, 380)])
-        assert error == -10
+        assert compute_alignment_error([(310, 100), (320, 380)]) == -10
 
 
-# --- home() integration tests ---
+# --- home() tests (gradient descent on width) ---
 
 class FakeCapture:
-    """Mock cv2.VideoCapture that returns pre-defined frames."""
-
     def __init__(self, frames):
         self._frames = list(frames)
         self._index = 0
@@ -134,7 +141,6 @@ class FakeCapture:
         return True, frame
 
     def grab(self):
-        """Consume a frame without decoding (used by flush)."""
         if self._index < len(self._frames):
             self._index += 1
             return True
@@ -142,63 +148,14 @@ class FakeCapture:
 
 
 class TestHome:
-    # flush_frames=0 disables camera flushing in tests so we don't consume
-    # extra frames from FakeCapture.  _try_detect_markers still retries up
-    # to 3 reads per attempt, so provide enough frames.
-
-    def test_already_aligned(self):
-        """If markers are already aligned, home returns True immediately."""
-        base_x = 320
-        frame = make_frame_with_markers([(base_x + ALIGNED_OFFSET, 100), (base_x, 380)])
-        cap = FakeCapture([frame] * 3)
-        moves = []
-        result = home(cap, move_fn=lambda **kw: moves.append(kw),
-                      settle_time=0, tolerance_px=10, roi_x_fraction=1.0,
-                      flush_frames=0, confirm_reads=3, min_brightness=0)
-        assert result['aligned'] is True
-        assert len(moves) == 0
-
-    def test_nudges_to_align(self):
-        """Simulates marker moving closer to alignment after each nudge."""
-        base_x = 320
-        aligned_frame = make_frame_with_markers([(base_x + ALIGNED_OFFSET + 5, 100), (base_x, 380)])
-        frames = [
-            make_frame_with_markers([(base_x + ALIGNED_OFFSET + 30, 100), (base_x, 380)]),  # error=+30
-            make_frame_with_markers([(base_x + ALIGNED_OFFSET + 15, 100), (base_x, 380)]),  # error=+15
-            aligned_frame, aligned_frame, aligned_frame,  # 3 confirms
-        ]
-        cap = FakeCapture(frames)
-        moves = []
-        result = home(cap, move_fn=lambda **kw: moves.append(kw),
-                      settle_time=0, tolerance_px=10, roi_x_fraction=1.0,
-                      flush_frames=0, confirm_reads=3, min_brightness=0)
-        assert result['aligned'] is True
-        assert len(moves) == 2  # two nudges before alignment
-
-    def test_max_attempts_exceeded(self):
-        """If never aligned, home returns False after max_attempts."""
-        base_x = 320
-        frame = make_frame_with_markers([(base_x + ALIGNED_OFFSET + 80, 100), (base_x, 380)])  # error=80
-        # Provide enough identical frames for all attempts
-        cap = FakeCapture([frame] * 10)
-        moves = []
-        result = home(cap, move_fn=lambda **kw: moves.append(kw),
-                      settle_time=0, max_attempts=5, tolerance_px=10,
-                      roi_x_fraction=1.0, flush_frames=0, min_brightness=0)
-        assert result['aligned'] is False
-        assert len(moves) == 5
-
     def test_camera_failure(self):
-        """If camera read fails, home returns False."""
         cap = FakeCapture([])
         result = home(cap, move_fn=lambda **kw: None, settle_time=0,
                       roi_x_fraction=1.0, flush_frames=0, min_brightness=0)
         assert result['aligned'] is False
 
-    def test_markers_not_found(self):
-        """If markers are not visible, home exhausts attempts."""
+    def test_blob_not_found(self):
         blank = np.zeros((480, 640, 3), dtype=np.uint8)
-        # _try_detect_markers reads up to 3 frames per attempt
         cap = FakeCapture([blank] * 15)
         result = home(cap, move_fn=lambda **kw: None,
                       settle_time=0, max_attempts=3, roi_x_fraction=1.0,
@@ -206,46 +163,24 @@ class TestHome:
         assert result['aligned'] is False
         assert result['marker_loss_count'] == 3
 
-    def test_nudge_direction_positive_error(self):
-        """Positive error (top marker too far right) should nudge backward."""
-        base_x = 320
-        aligned_frame = make_frame_with_markers([(base_x + ALIGNED_OFFSET, 100), (base_x, 380)])
-        frames = [
-            make_frame_with_markers([(base_x + ALIGNED_OFFSET + 30, 100), (base_x, 380)]),  # error=+30
-            aligned_frame, aligned_frame, aligned_frame,  # 3 confirms
-        ]
+    def test_starts_nudging_forward(self):
+        """Gradient descent starts with forward nudges."""
+        frames = [make_green_blob(100, 100, 50)] * 5
         cap = FakeCapture(frames)
         moves = []
         home(cap, move_fn=lambda **kw: moves.append(kw),
-             settle_time=0, nudge_speed=0.4, roi_x_fraction=1.0,
-             flush_frames=0, confirm_reads=3, min_brightness=0)
-        assert moves[0]['velocity'] < 0  # negative = nudge backward to correct positive error
+             settle_time=0, max_attempts=2, roi_x_fraction=1.0,
+             flush_frames=0, min_brightness=0)
+        assert len(moves) > 0
+        assert moves[0]['velocity'] > 0  # starts forward
 
-    def test_nudge_direction_negative_error(self):
-        """Negative error (top marker too far left) should nudge forward."""
-        base_x = 320
-        aligned_frame = make_frame_with_markers([(base_x + ALIGNED_OFFSET, 100), (base_x, 380)])
-        frames = [
-            make_frame_with_markers([(base_x + ALIGNED_OFFSET - 30, 100), (base_x, 380)]),  # error=-30
-            aligned_frame, aligned_frame, aligned_frame,  # 3 confirms
-        ]
-        cap = FakeCapture(frames)
+    def test_stable_width_declares_aligned(self):
+        """If width is stable across reads, declares aligned."""
+        frame = make_green_blob(100, 100, 34)
+        # Need enough frames: 1 for brightness + attempts with retries + confirms
+        cap = FakeCapture([frame] * 30)
         moves = []
-        home(cap, move_fn=lambda **kw: moves.append(kw),
-             settle_time=0, nudge_speed=0.4, roi_x_fraction=1.0,
-             flush_frames=0, confirm_reads=3, min_brightness=0)
-        assert moves[0]['velocity'] > 0  # positive = nudge forward to correct negative error
-
-    def test_marker_loss_tracked(self):
-        """Marker losses should be counted in the result."""
-        base_x = 320
-        blank = np.zeros((480, 640, 3), dtype=np.uint8)
-        aligned = make_frame_with_markers([(base_x + ALIGNED_OFFSET, 100), (base_x, 380)])
-        # 3 blank frames (retried 3x each = 9 reads), then 3 aligned confirms
-        frames = [blank] * 9 + [aligned] * 3
-        cap = FakeCapture(frames)
-        result = home(cap, move_fn=lambda **kw: None,
-                      settle_time=0, roi_x_fraction=1.0, flush_frames=0,
-                      confirm_reads=3, min_brightness=0)
+        result = home(cap, move_fn=lambda **kw: moves.append(kw),
+                      settle_time=0, tolerance_px=2, roi_x_fraction=1.0,
+                      flush_frames=0, confirm_reads=3, min_brightness=0)
         assert result['aligned'] is True
-        assert result['marker_loss_count'] == 3

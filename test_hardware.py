@@ -58,6 +58,9 @@ def run_hardware_test(model='models/efficientdet_lite0.tflite', camera_id=0,
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
+    # Auto white balance for consistent marker detection across lighting
+    cap.set(cv2.CAP_PROP_AUTO_WB, 1)
+
     if not cap.isOpened():
         print("FAIL: Cannot open camera")
         return False
@@ -82,7 +85,8 @@ def run_hardware_test(model='models/efficientdet_lite0.tflite', camera_id=0,
                 print("  *** MOTOR CYCLING ***")
                 utils.cycle()
             print("  *** VISUAL HOMING ***")
-            homed = homing.home(cap)
+            homing_result = homing.home(cap)
+            homed = homing_result['aligned']
             print(f"  *** HOMING: {'ALIGNED' if homed else 'FAILED'} ***")
         except KeyboardInterrupt:
             print("\n\nAborted by user.")
@@ -173,7 +177,8 @@ def run_hardware_test(model='models/efficientdet_lite0.tflite', camera_id=0,
                     utils.cycle()
                     motor_cycled = True
                     print(f"  *** [{elapsed:5.1f}s] VISUAL HOMING ***")
-                    homed = homing.home(cap)
+                    homing_result = homing.home(cap)
+                    homed = homing_result['aligned']
                     print(f"  *** HOMING: {'ALIGNED' if homed else 'FAILED'} ***")
 
             # Done once motor has cycled and we're back to IDLE

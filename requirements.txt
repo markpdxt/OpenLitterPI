@@ -8,3 +8,4 @@ opencv-python
 numpy
 adafruit-circuitpython-motorkit
 adafruit-blinka
+flask

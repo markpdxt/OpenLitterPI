@@ -37,4 +37,4 @@ fi
 
 cd /home/pi/openlitterpi
 source openlitterpi-env/bin/activate
-python cycle.py
+python detect.py

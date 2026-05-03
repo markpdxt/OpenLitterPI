@@ -64,9 +64,19 @@ IDLE → DETECTED → USING → WAITING → CYCLING → COMPLETE
 USB Camera → detect.py (main loop) → TFLite model → cat_detected boolean
     → LitterBoxStateMachine.process_frame() → actions list
     → notifications.py (email + photo) and/or motor.py (cleaning cycle)
+    → event_logger.py (queue → SQLite) → dashboard/app.py (Flask on port 5000)
 ```
 
 `detect.py` is the orchestrator: captures frames, runs inference, feeds the state machine, executes returned actions. `utils.py` re-exports `cycle()`/`move()`/`send_message()` and provides bounding-box visualization.
+
+### Web Dashboard
+
+Flask dashboard runs as a daemon thread inside `detect.py` on port 5000. Access at `http://192.168.5.13:5000`.
+
+- **EventLogger** (`event_logger.py`) - queues events from detect.py, writes to SQLite in batches via background thread, shares live state with Flask
+- **Database** (`dashboard/database.py`) - SQLite at `data/openlitterpi.db`, auto-rotates events older than 30 days
+- **Dashboard** (`dashboard/app.py` + `dashboard/templates/dashboard.html`) - server-rendered HTML with 5-second auto-refresh, shows current state, cycle stats, detection stats, homing results, activity log
+- **JSON API** - `GET /api/status` returns live state as JSON
 
 ### Key Design Decisions
 

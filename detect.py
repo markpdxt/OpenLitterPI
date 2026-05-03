@@ -18,6 +18,7 @@ import sys
 import cv2
 import time
 import argparse
+import threading
 import numpy as np
 from tflite_support.task import core
 from tflite_support.task import vision
@@ -25,6 +26,8 @@ from tflite_support.task import processor
 import utils
 import homing
 from state_machine import LitterBoxStateMachine
+from event_logger import EventLogger
+from dashboard.app import create_app
 
 TARGET_LABELS = {'cat', 'teddy bear'}
 
@@ -34,7 +37,18 @@ def run(model: str, camera_id: int, width: int, height: int, num_threads: int,
 
     sm = LitterBoxStateMachine()
 
+    # Start event logger and dashboard
+    logger = EventLogger()
+    logger.start()
+    app = create_app(logger)
+    flask_thread = threading.Thread(
+        target=lambda: app.run(host='0.0.0.0', port=5000, use_reloader=False),
+        daemon=True
+    )
+    flask_thread.start()
+
     isStartup = True
+    prev_status = sm.status.name
 
     # Calculate FPS
     counter, fps = 0, 0
@@ -44,6 +58,11 @@ def run(model: str, camera_id: int, width: int, height: int, num_threads: int,
     cap = cv2.VideoCapture(camera_id)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+
+    # Auto white balance adapts to changing indoor lighting conditions.
+    # Fixed WB (4500K) produced heavy color casts that made marker detection
+    # unreliable — auto WB gives the best marker-to-background contrast.
+    cap.set(cv2.CAP_PROP_AUTO_WB, 1)
 
     # Visualization parameters
     row_size = 20  # pixels
@@ -85,7 +104,7 @@ def run(model: str, camera_id: int, width: int, height: int, num_threads: int,
         image = utils.visualize(image, detection_result)
 
         if isStartup:
-            utils.send_message("Startup", image)
+            utils.send_message("Startup", image, to="notify@pdxt.com")
             isStartup = False
 
         # Collapse multiple detections into a single boolean per frame
@@ -99,17 +118,42 @@ def run(model: str, camera_id: int, width: int, height: int, num_threads: int,
 
         # Execute actions returned by the state machine
         for action, status_name in actions:
-            if action == "message" and status_name in ("DETECTED", "COMPLETE"):
-                utils.send_message(status_name, image)
+            if action == "message":
+                logger.log_event('state_change', detail={
+                    'old': prev_status,
+                    'new': status_name,
+                    'occupied_frames': sm.occupied_frames,
+                })
+                if status_name in ("DETECTED", "COMPLETE"):
+                    utils.send_message(status_name, image, to="notify@pdxt.com")
+                prev_status = status_name
             elif action == "cycle":
+                logger.update_live_state(
+                    status='CYCLING',
+                    elapsed_time=sm.elapsed_time,
+                    fps=round(fps, 1),
+                    occupied_frames=sm.occupied_frames,
+                )
+                cycle_start = time.time()
                 utils.cycle()
-                homing.home(cap)
+                cycle_duration = time.time() - cycle_start
+                logger.log_event('cycle_complete', detail={
+                    'duration_seconds': round(cycle_duration, 1),
+                })
+                homing_result = homing.home(cap)
+                logger.log_event('homing_result', detail=homing_result)
 
         # Calculate the FPS
         if counter % fps_avg_frame_count == 0:
             end_time = time.time()
             fps = fps_avg_frame_count / (end_time - start_time)
             start_time = time.time()
+            logger.update_live_state(
+                status=sm.status.name,
+                elapsed_time=sm.elapsed_time,
+                fps=round(fps, 1),
+                occupied_frames=sm.occupied_frames,
+            )
 
         # Show the Status
         text = '{}'.format(sm.status)

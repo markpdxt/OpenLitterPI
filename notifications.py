@@ -33,23 +33,25 @@ EMAIL_PASSWORD = os.environ.get("OPENLITTERPI_EMAIL_PASSWORD", "")
 EMAIL_TO = os.environ.get("OPENLITTERPI_EMAIL_TO", "")
 
 
-def send_message(message_text, photo=None, include_image=True):
+def send_message(message_text, photo=None, include_image=True, to=None):
     """
     Send an email notification with optional photo attachment.
-    
+
     Args:
         message_text: Subject/body text for the email
         photo: OpenCV image array to attach
         include_image: Whether to attach the photo
+        to: Override recipient email address (defaults to OPENLITTERPI_EMAIL_TO)
     """
-    if not all([EMAIL_FROM, EMAIL_PASSWORD, EMAIL_TO]):
+    recipient = to or EMAIL_TO
+    if not all([EMAIL_FROM, EMAIL_PASSWORD, recipient]):
         print(f"Warning: Email not configured. Skipping notification: {message_text}")
         return
 
     msg = EmailMessage()
     msg['Subject'] = f"{EMAIL_SUBJECT} - {message_text}"
     msg['From'] = EMAIL_FROM
-    msg['To'] = EMAIL_TO
+    msg['To'] = recipient
     msg.set_content(message_text)
 
     if include_image and photo is not None:
@@ -64,4 +66,4 @@ def send_message(message_text, photo=None, include_image=True):
     context = ssl.create_default_context()
     with smtplib.SMTP_SSL('smtp.gmail.com', 465, context=context) as smtp:
         smtp.login(EMAIL_FROM, EMAIL_PASSWORD)
-        smtp.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
+        smtp.sendmail(EMAIL_FROM, recipient, msg.as_string())
